@@ -6,6 +6,7 @@ import cloudscraper
 import random
 import time
 from generate_report import generate_html_report
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # List of different headers to rotate
 HEADERS_LIST = [
@@ -42,6 +43,74 @@ MAX_RETRIES = 3
 
 scraper = cloudscraper.create_scraper()
 
+def scrape_single_page(page_info):
+    """Scrape a single page and return its data"""
+    page, base_url = page_info
+    if page == 1:
+        url = base_url
+    else:
+        url = f"{base_url}?p={page}"
+    
+    print(f"Scraping page {page}: {url}")
+    
+    retry_count = 0
+    success = False
+    payouts_data = []
+    
+    while retry_count < MAX_RETRIES and not success:
+        headers = random.choice(HEADERS_LIST)
+        try:
+            response = scraper.get(url, headers=headers)
+            if response.status_code == 200:
+                success = True
+                soup = BeautifulSoup(response.text, 'html.parser')
+            elif response.status_code == 403:
+                retry_count += 1
+                print(f"Received 403 on page {page}. Retrying ({retry_count}/{MAX_RETRIES}) with different headers.")
+                continue
+            else:
+                print(f"Failed to retrieve page {page}. Status code: {response.status_code}")
+                break
+        except Exception as e:
+            retry_count += 1
+            print(f"Error retrieving page {page}: {e}. Retrying ({retry_count}/{MAX_RETRIES})...")
+            continue
+            
+    if not success:
+        return page, None
+        
+    for row in soup.find_all('div', class_='divTableRow'):
+        cells = row.find_all('div', class_='divTableCell')
+        if len(cells) >= 4:
+            date_str = cells[0].get_text(strip=True)
+            if not date_str:
+                continue
+                
+            trader = cells[1].get_text(strip=True)
+            location = cells[2].get_text(strip=True)
+            amount_str_raw = cells[3].get_text(strip=True)
+            
+            if not amount_str_raw.startswith('$'):
+                continue
+                
+            amount_str = amount_str_raw.replace('$', '').replace(',', '')
+            
+            try:
+                amount = float(amount_str)
+                payouts_data.append({
+                    'Name': trader,
+                    'Location': location,
+                    'Amount': amount,
+                    'Page': page,
+                    'Date': date_str
+                })
+            except ValueError:
+                continue
+    
+    # Add a smaller random delay between requests
+    time.sleep(random.uniform(0.2, 0.5))
+    return page, payouts_data
+
 def scrape_apex_payouts():
     # Define the base URL
     base_url = "https://apextraderfunding.com/payouts"
@@ -51,7 +120,7 @@ def scrape_apex_payouts():
     end_date = None
     
     # Define the last page constant (set to 100 for testing)
-    LAST_PAGE = 50  # Change to 'last' to dynamically find the last page
+    LAST_PAGE = 'last'  # Change to 'last' to dynamically find the last page
     
     # Initialize a list to hold all payout data
     all_payouts_data = []
@@ -92,100 +161,48 @@ def scrape_apex_payouts():
     
     print(f"Starting to scrape {total_pages} pages...")
     
-    # Iterate through each page
-    for page in range(1, total_pages + 1):
-        if page == 1:
-            url = base_url
-        else:
-            url = f"{base_url}?p={page}"
+    # Prepare the list of pages to scrape
+    pages_to_scrape = [(page, base_url) for page in range(1, total_pages + 1)]
+    all_payouts_data = []
+    successful_pages = 0
+    failed_pages = []
+    start_date = None
+    end_date = None
+
+    # Use ThreadPoolExecutor for parallel scraping
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        # Submit all pages to the executor
+        future_to_page = {executor.submit(scrape_single_page, page_info): page_info[0] 
+                         for page_info in pages_to_scrape}
         
-        print(f"Scraping page {page}: {url}")
-        
-        # Initialize retry count
-        retry_count = 0
-        success = False
-        
-        while retry_count < MAX_RETRIES and not success:
-            # Choose a random header
-            headers = random.choice(HEADERS_LIST)
+        # Process completed futures as they finish
+        for future in as_completed(future_to_page):
+            page = future_to_page[future]
             try:
-                response = scraper.get(url, headers=headers)
-                if response.status_code == 200:
-                    success = True
-                    soup = BeautifulSoup(response.text, 'html.parser')
-                elif response.status_code == 403:
-                    retry_count += 1
-                    print(f"Received 403 on page {page}. Retrying ({retry_count}/{MAX_RETRIES}) with different headers.")
-                    continue
-                else:
-                    print(f"Failed to retrieve page {page}. Status code: {response.status_code}")
-                    break
-            except Exception as e:
-                retry_count += 1
-                print(f"Error retrieving page {page}: {e}. Retrying ({retry_count}/{MAX_RETRIES})...")
-                continue
-        
-        if not success:
-            print(f"Skipping page {page} after {MAX_RETRIES} failed attempts.")
-            failed_pages.append(page)
-            continue
-        
-        successful_pages += 1
-        
-        # Extract payout data from the current page
-        payouts_data = []
-        
-        for row in soup.find_all('div', class_='divTableRow'):
-            cells = row.find_all('div', class_='divTableCell')
-            if len(cells) >= 4:
-                date_str = cells[0].get_text(strip=True)
-                if not date_str:  # Check if date string is empty
-                    continue
-                # Update date range
-                try:
-                    # Parse date with abbreviated month format
-                    current_date = datetime.strptime(date_str, '%b %d, %Y').date()
+                page_num, page_data = future.result()
+                if page_data is not None:
+                    successful_pages += 1
+                    all_payouts_data.extend(page_data)
                     
-                    if start_date is None or current_date > start_date:
-                        start_date = current_date
-                    if end_date is None or current_date < end_date:
-                        end_date = current_date
-                except ValueError:
-                    pass
-                
-                trader = cells[1].get_text(strip=True)
-                location = cells[2].get_text(strip=True)
-                amount_str_raw = cells[3].get_text(strip=True)
-                
-                # Validate that the amount starts with '$'
-                if not amount_str_raw.startswith('$'):
-                    print(f"Skipping non-payout row with amount: {amount_str_raw}")
-                    continue
-                
-                amount_str = amount_str_raw.replace('$', '').replace(',', '')
-                
-                try:
-                    amount = float(amount_str)
-                    payouts_data.append({
-                        'Name': trader,
-                        'Location': location,
-                        'Amount': amount,
-                        'Page': page
-                    })
-                except ValueError:
-                    print(f"Skipping invalid amount: {amount_str}")
-                    continue
-        
-        print(f"Found {len(payouts_data)} payouts on page {page}.")
-        
-        # Extend the main list with data from the current page
-        all_payouts_data.extend(payouts_data)
-        
-        # Optional: Add a random delay between requests
-        delay = random.uniform(1, 3)  # Delay between 1 to 3 seconds
-        print(f"Sleeping for {delay:.2f} seconds to mimic human behavior.")
-        time.sleep(delay)
-    
+                    # Update date range from the page data
+                    for row in page_data:
+                        try:
+                            current_date = datetime.strptime(row['Date'], '%b %d, %Y').date()
+                            if start_date is None or current_date > start_date:
+                                start_date = current_date
+                            if end_date is None or current_date < end_date:
+                                end_date = current_date
+                        except ValueError:
+                            pass
+                            
+                    print(f"Successfully scraped page {page} with {len(page_data)} payouts")
+                else:
+                    failed_pages.append(page)
+                    print(f"Failed to scrape page {page}")
+            except Exception as e:
+                failed_pages.append(page)
+                print(f"Exception occurred while processing page {page}: {e}")
+
     # Create DataFrame from all collected data
     df = pd.DataFrame(all_payouts_data)
     
