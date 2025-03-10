@@ -7,6 +7,23 @@ env/
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
 
 # Distribution / packaging
 dist/
@@ -24,3 +41,27 @@ payout_report.html
 
 # Environment variables
 .env 
+
+# Virtual environment
+venv/
+ENV/
+env/
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Data and report directories
+data/
+reports/
+
+# Selenium debug files
+*.html
+geckodriver.log
+chromedriver.log
+
+# OS specific files
+.DS_Store
+Thumbs.db 
